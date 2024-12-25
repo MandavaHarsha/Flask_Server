@@ -104,14 +104,12 @@ def stream_audio():
 
     # If not cached or invalid, process with yt_dlp
     video_url = f'https://www.youtube.com/watch?v={video_id}'
-    
-    # Path to your cookies.txt file exported from the browser
-    cookies_path = 'path/to/your/cookies.txt'
 
     ydl_opts = {
         'format': 'bestaudio/best',
-         cookies = os.getenv('YT_DLP_COOKIES')
+        'cookies': os.getenv('YT_DLP_COOKIES')  # Correct syntax here
     }
+
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
