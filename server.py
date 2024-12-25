@@ -83,11 +83,6 @@ def search_videos():
 
     return jsonify(results)
 
-from flask import Flask, request, jsonify
-import json
-import tempfile
-import os
-
 @app.route('/stream', methods=['POST'])
 def stream_audio():
     data = request.get_json()
@@ -130,6 +125,9 @@ def stream_audio():
                 'no_warnings': True,
                 'extract_flat': False,
                 'nocheckcertificate': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
+                }
             }
 
             with YoutubeDL(ydl_opts) as ydl:
