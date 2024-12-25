@@ -83,6 +83,11 @@ def search_videos():
 
     return jsonify(results)
 
+from flask import Flask, request, jsonify
+import json
+import tempfile
+import os
+
 @app.route('/stream', methods=['POST'])
 def stream_audio():
     data = request.get_json()
@@ -94,33 +99,61 @@ def stream_audio():
     # Check if the audio URL is cached
     cached_audio_url = cache.get(f"audio_url:{video_id}")
     if cached_audio_url:
-        # Validate the cached URL
-        response = requests.head(cached_audio_url)
-        if response.status_code == 200:
-            logger.info(f'Cache hit for video ID: {video_id}')
-            return jsonify({'audioUrl': cached_audio_url})
-        else:
-            logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
+        try:
+            response = requests.head(cached_audio_url)
+            if response.status_code == 200:
+                logger.info(f'Cache hit for video ID: {video_id}')
+                return jsonify({'audioUrl': cached_audio_url})
+            else:
+                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
+        except Exception as e:
+            logger.warning(f'Error validating cached URL: {e}')
 
-    # If not cached or invalid, process with yt_dlp
-    video_url = f'https://www.youtube.com/watch?v={video_id}'
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'cookies': os.getenv('YT_DLP_COOKIES')  # Correct syntax here
-    }
-
+    # Get cookies from environment variable
+    cookie_data = os.getenv('YOUTUBE_COOKIES')
+    if not cookie_data:
+        logger.error('YOUTUBE_COOKIES environment variable not set')
+        return jsonify({'error': 'Cookie configuration missing'}), 500
 
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(video_url, download=False)
-            audio_url = info_dict['url']
-            cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)  # Cache for 7 days
-            logger.info(f'Caching audio URL for video ID: {video_id}')
-            return jsonify({'audioUrl': audio_url})
+        # Create a temporary file to store cookies
+        with tempfile.NamedTemporaryFile(mode='w+', delete=True) as temp_cookie_file:
+            # Write the cookie data to temporary file
+            temp_cookie_file.write(cookie_data)
+            temp_cookie_file.flush()
+
+            video_url = f'https://www.youtube.com/watch?v={video_id}'
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'cookiefile': temp_cookie_file.name,
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'nocheckcertificate': True,
+            }
+
+            with YoutubeDL(ydl_opts) as ydl:
+                try:
+                    info_dict = ydl.extract_info(video_url, download=False)
+                    audio_url = info_dict['url']
+                    
+                    # Cache the successful URL
+                    cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
+                    logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+                    
+                    return jsonify({'audioUrl': audio_url})
+                    
+                except Exception as e:
+                    logger.error(f'Error extracting video info: {str(e)}')
+                    if 'confirm you\'re not a bot' in str(e):
+                        return jsonify({
+                            'error': 'YouTube bot detection triggered. Please check cookie configuration.'
+                        }), 403
+                    return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
+
     except Exception as e:
-        logger.error(f'Error streaming audio: {e}')
-        return jsonify({'error': 'Failed to stream audio'}), 500
+        logger.error(f'Error in cookie handling: {str(e)}')
+        return jsonify({'error': 'Failed to process video request'}), 500
 
 
 @app.route('/recently-played', methods=['POST'])
