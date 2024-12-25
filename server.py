@@ -53,6 +53,12 @@ except ConnectionError as e:
     logger.error(f'Redis connection error: {e}')
     exit(1)  # Exit if Redis is unavailable
 
+
+@app.route('/')
+def home():
+    return "Welcome to my deployed Flask server and it running sucessfully!"
+
+
 @app.route('/search', methods=['GET'])
 def search_videos():
     query = request.args.get('q', '').strip()
