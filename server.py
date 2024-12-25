@@ -56,7 +56,7 @@ except ConnectionError as e:
 
 @app.route('/')
 def home():
-    return "Welcome to my deployed Flask server and it running sucessfully!"
+    return "Welcome to deployed Flask server and it running sucessfully!"
 
 
 @app.route('/search', methods=['GET'])
