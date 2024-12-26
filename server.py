@@ -19,30 +19,14 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-
 # Configure CORS to accept requests from any origin
-CORS(app, resources={
-    r"/*": {
-        "origins": ["*"],  # Allow all origins
-        "methods": ["GET", "POST", "OPTIONS"],  # Allowed methods
-        "allow_headers": ["Content-Type", "Authorization"]  # Allowed headers
-    }
-})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Setup caching (Redis as cache backend)
 # Setup caching (Upstash Redis as cache backend)
 app.config['CACHE_TYPE'] = 'RedisCache'
 app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')  # Load from .env
 app.config['CACHE_REDIS_SSL'] = True
 cache = Cache(app)
-
-# Test Redis connection (check if it's working correctly)
-try:
-    cache.get('test_key')  # Test Redis connection
-except redis.exceptions.AuthenticationError as e:
-    print(f"Redis authentication error: {e}")
-except Exception as e:
-    print(f"Error connecting to Redis: {e}")
 
 # YouTube API setup
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')  # Load from .env
@@ -55,11 +39,9 @@ except ConnectionError as e:
     logger.error(f'Redis connection error: {e}')
     exit(1)  # Exit if Redis is unavailable
 
-
 @app.route('/')
 def home():
-    return "Welcome to deployed Flask server and it running sucessfully!"
-
+    return "Welcome to deployed Flask server and it's running successfully!"
 
 @app.route('/search', methods=['GET'])
 def search_videos():
@@ -138,13 +120,19 @@ def stream_audio():
             try:
                 info_dict = ydl.extract_info(video_url, download=False)
                 audio_url = info_dict['url']
-                
+
                 # Cache the successful URL
                 cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
                 logger.info(f'Successfully cached audio URL for video ID: {video_id}')
-                
-                return jsonify({'audioUrl': audio_url})
-                
+
+                # Add CORS headers to the response
+                headers = {
+                    'Access-Control-Allow-Origin': '*',  # Allow all origins
+                    'Content-Type': 'audio/webm',  # Adjust based on the actual audio format
+                }
+
+                return jsonify({'audioUrl': audio_url}), 200, headers
+
             except Exception as e:
                 logger.error(f'Error extracting video info: {str(e)}')
                 if 'confirm you\'re not a bot' in str(e):
