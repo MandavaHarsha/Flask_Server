@@ -99,8 +99,8 @@ def proxy_stream():
             'Content-Type': response.headers.get('Content-Type', 'audio/webm'),
             'Content-Length': response.headers.get('Content-Length', ''),
             'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*'
-            'Connection': 'keep-alive' ,
+            'Access-Control-Allow-Origin': '*',
+            'Connection': 'keep-alive'
         }
 
         # Stream the response back to the client
