@@ -31,6 +31,10 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 # YouTube API client
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
+@app.route('/')
+def home():
+    return "Welcome to deployed Flask server and it running sucessfully!"
+
 class VideoRequest(BaseModel):
     videoId: str
 
