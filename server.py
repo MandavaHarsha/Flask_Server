@@ -96,25 +96,29 @@ def stream_audio():
     cached_audio_url = cache.get(f"audio_url:{video_id}")
     if cached_audio_url:
         try:
-            response = requests.head(cached_audio_url)
+            # Verify the cached URL is still valid
+            response = requests.head(cached_audio_url, timeout=5)
             if response.status_code == 200:
                 logger.info(f'Cache hit for video ID: {video_id}')
-                return jsonify({'audioUrl': cached_audio_url})
+                # Add CORS headers to the response
+                return jsonify({
+                    'audioUrl': cached_audio_url,
+                    'contentType': response.headers.get('content-type', '')
+                })
             else:
-                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
+                logger.warning(f'Cached URL invalid for video ID {video_id}. Status: {response.status_code}')
         except Exception as e:
             logger.warning(f'Error validating cached URL: {e}')
-
-    # Get cookies from environment variable
-    cookie_data = os.getenv('YOUTUBE_COOKIES')
-    if not cookie_data:
-        logger.error('YOUTUBE_COOKIES environment variable not set')
-        return jsonify({'error': 'Cookie configuration missing'}), 500
+            cache.delete(f"audio_url:{video_id}")
 
     try:
-        # Create a temporary file to store cookies
+        # Get cookies from environment variable
+        cookie_data = os.getenv('YOUTUBE_COOKIES')
+        if not cookie_data:
+            logger.error('YOUTUBE_COOKIES environment variable not set')
+            return jsonify({'error': 'Cookie configuration missing'}), 500
+
         with tempfile.NamedTemporaryFile(mode='w+', delete=True) as temp_cookie_file:
-            # Write the cookie data to temporary file
             temp_cookie_file.write(cookie_data)
             temp_cookie_file.flush()
 
@@ -126,32 +130,41 @@ def stream_audio():
                 'no_warnings': True,
                 'extract_flat': False,
                 'nocheckcertificate': True,
+                'format_sort': ['acodec:mp3', 'acodec:m4a'],  # Prefer MP3 or M4A formats
                 'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
             }
 
             with YoutubeDL(ydl_opts) as ydl:
                 try:
                     info_dict = ydl.extract_info(video_url, download=False)
+                    # Log the available formats
+                    logger.info(f"Available formats for {video_id}: {[f['format'] for f in info_dict.get('formats', [])]}")
+                    
                     audio_url = info_dict['url']
+                    content_type = info_dict.get('ext', 'mp3')
+                    
+                    # Verify the extracted URL is accessible
+                    response = requests.head(audio_url, timeout=5)
+                    if response.status_code != 200:
+                        raise Exception(f'Audio URL not accessible: {response.status_code}')
                     
                     # Cache the successful URL
-                    cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
+                    cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)
                     logger.info(f'Successfully cached audio URL for video ID: {video_id}')
                     
-                    return jsonify({'audioUrl': audio_url})
+                    return jsonify({
+                        'audioUrl': audio_url,
+                        'contentType': f'audio/{content_type}'
+                    })
                     
                 except Exception as e:
                     logger.error(f'Error extracting video info: {str(e)}')
-                    if 'confirm you\'re not a bot' in str(e):
-                        return jsonify({
-                            'error': 'YouTube bot detection triggered. Please check cookie configuration.'
-                        }), 403
                     return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
 
     except Exception as e:
-        logger.error(f'Error in cookie handling: {str(e)}')
+        logger.error(f'Error in stream endpoint: {str(e)}')
         return jsonify({'error': 'Failed to process video request'}), 500
 
 
