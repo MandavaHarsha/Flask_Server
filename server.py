@@ -19,6 +19,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
 # Configure CORS to accept requests from any origin
 CORS(app, resources={
     r"/*": {
@@ -28,7 +29,8 @@ CORS(app, resources={
     }
 })
 
-# Setup Redis caching (Upstash Redis or local Redis)
+# Setup caching (Redis as cache backend)
+# Setup caching (Upstash Redis as cache backend)
 app.config['CACHE_TYPE'] = 'RedisCache'
 app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')  # Load from .env
 app.config['CACHE_REDIS_SSL'] = True
@@ -56,7 +58,7 @@ except ConnectionError as e:
 
 @app.route('/')
 def home():
-    return "Welcome to the deployed Flask server, it is running successfully!"
+    return "Welcome to deployed Flask server and it running sucessfully!"
 
 
 @app.route('/search', methods=['GET'])
@@ -217,67 +219,5 @@ def get_liked_songs():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
-# Recently played functionality using Redis cache
-@app.route('/recently-played', methods=['POST'])
-def add_recently_played():
-    """Add a song to the recently played list."""
-    data = request.get_json()
-    video_id = data.get('videoId')
-    title = data.get('title')
-
-    if not video_id or not title:
-        return jsonify({'error': 'Video ID and title are required'}), 400
-
-    # Fetch existing recently played songs
-    recently_played = cache.get('recently_played')
-    recently_played = eval(recently_played) if recently_played else []
-
-    # Add the new song to the list and limit to last 10 songs
-    recently_played.append({'videoId': video_id, 'title': title})
-    recently_played = recently_played[-10:]
-
-    # Cache the updated list
-    cache.set('recently_played', recently_played, timeout=60 * 60 * 24 * 2)  # Cache for 7 days
-    return jsonify({'message': 'Song added to recently played'})
-
-@app.route('/recently-played', methods=['GET'])
-def get_recently_played():
-    """Get the list of recently played songs."""
-    recently_played = cache.get('recently_played')
-    recently_played = eval(recently_played) if recently_played else []
-    return jsonify(recently_played)
-
-# Like song functionality using Redis cache
-@app.route('/liked-songs', methods=['POST'])
-def like_song():
-    """Add a song to the liked songs list."""
-    data = request.get_json()
-    video_id = data.get('videoId')
-    title = data.get('title')
-
-    if not video_id or not title:
-        return jsonify({'error': 'Video ID and title are required'}), 400
-
-    # Fetch existing liked songs
-    liked_songs = cache.get('liked_songs')
-    liked_songs = eval(liked_songs) if liked_songs else []
-
-    # Add the new song to the list if it's not already liked
-    if {'videoId': video_id, 'title': title} not in liked_songs:
-        liked_songs.append({'videoId': video_id, 'title': title})
-
-    # Cache the updated list
-    cache.set('liked_songs', liked_songs, timeout=60 * 60 * 24 * 120)  # Cache for 120 days
-    return jsonify({'message': 'Song added to liked songs'})
-
-@app.route('/liked-songs', methods=['GET'])
-def get_liked_songs():
-    """Get the list of liked songs."""
-    liked_songs = cache.get('liked_songs')
-    liked_songs = eval(liked_songs) if liked_songs else []
-    return jsonify(liked_songs)
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port)
 
