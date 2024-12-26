@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import yt_dlp
 import redis
@@ -10,17 +11,20 @@ from functools import lru_cache
 
 app = FastAPI()
 
-# Updated CORS middleware
+origins = [
+    "http://localhost:3000",
+    "*"  # During development. Remove in production
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Add your frontend domain
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["*"]
+    max_age=3600,
 )
 
-# Rest of the code remains same as before
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 REDIS_URL = os.getenv('CACHE_REDIS_URL')
 
@@ -30,13 +34,23 @@ youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 class VideoRequest(BaseModel):
     videoId: str
 
+@app.options("/{path:path}")
+async def options_route(path: str):
+    return JSONResponse(
+        content="OK",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
 @lru_cache(maxsize=100)
 def get_stream_url(video_id: str) -> str:
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': True,
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -52,7 +66,7 @@ async def search_videos(q: str):
     cached_result = redis_client.get(cache_key)
     
     if cached_result:
-        return json.loads(cached_result)
+        return JSONResponse(content=json.loads(cached_result))
     
     try:
         search_response = youtube.search().list(
@@ -72,7 +86,7 @@ async def search_videos(q: str):
             results.append(video_data)
         
         redis_client.setex(cache_key, 3600, json.dumps(results))
-        return results
+        return JSONResponse(content=results)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -81,7 +95,14 @@ async def search_videos(q: str):
 async def get_stream(video: VideoRequest):
     try:
         stream_url = get_stream_url(video.videoId)
-        return {"audioUrl": stream_url}
+        return JSONResponse(
+            content={"audioUrl": stream_url},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
