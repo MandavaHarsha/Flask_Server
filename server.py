@@ -66,85 +66,158 @@ def search_videos():
         return jsonify({'error': 'Query parameter "q" is required'}), 400
 
     try:
-        search_response = youtube.search().list(q=query, part='id,snippet', maxResults=5, type='video').execute()
+        search_response = youtube.search().list(
+            q=query,
+            part='id,snippet',
+            maxResults=5,
+            type='video'
+        ).execute()
     except Exception as e:
-        logger.error(f"Error fetching search results: {e}")
+        logger.error(f'Error fetching search results: {e}')
         return jsonify({'error': 'Failed to fetch search results'}), 500
 
-    results = [{'videoId': item['id']['videoId'], 'title': item['snippet']['title']} for item in search_response.get('items', [])]
+    results = [
+        {'videoId': item['id']['videoId'], 'title': item['snippet']['title']}
+        for item in search_response.get('items', [])
+    ]
+
     return jsonify(results)
-
-@app.route('/proxy-stream', methods=['GET'])
-def proxy_stream():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'URL parameter is required'}), 400
-
-    try:
-        response = requests.get(url, stream=True)
-        headers = {'Content-Type': response.headers.get('Content-Type', 'audio/webm'), 'Content-Length': response.headers.get('Content-Length', ''), 'Accept-Ranges': 'bytes', 'Access-Control-Allow-Origin': '*', 'Connection': 'keep-alive'}
-
-        def generate():
-            for chunk in response.iter_content(chunk_size=8192):
-                yield chunk
-
-        return Response(stream_with_context(generate()), headers=headers, status=response.status_code)
-
-    except Exception as e:
-        logger.error(f"Proxy streaming error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/stream', methods=['POST'])
 def stream_audio():
     data = request.get_json()
     video_id = data.get('videoId')
+
     if not video_id:
         return jsonify({'error': 'Video ID is required'}), 400
 
-    # Check Redis cache for the audio URL
+    # Check if the audio URL is cached
     cached_audio_url = cache.get(f"audio_url:{video_id}")
     if cached_audio_url:
         try:
-            response = requests.head(cached_audio_url, timeout=5)
+            response = requests.head(cached_audio_url)
             if response.status_code == 200:
-                logger.info(f"Cache hit for video ID: {video_id}")
-                proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={cached_audio_url}"
-                return jsonify({'audioUrl': proxy_url, 'contentType': response.headers.get('content-type', '')})
+                logger.info(f'Cache hit for video ID: {video_id}')
+                return jsonify({'audioUrl': cached_audio_url})
+            else:
+                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
         except Exception as e:
-            logger.warning(f"Error validating cached URL: {e}")
-            cache.delete(f"audio_url:{video_id}")
+            logger.warning(f'Error validating cached URL: {e}')
+
+    # Get cookies from environment variable
+    cookie_data = os.getenv('YOUTUBE_COOKIES')
+    if not cookie_data:
+        logger.error('YOUTUBE_COOKIES environment variable not set')
+        return jsonify({'error': 'Cookie configuration missing'}), 500
 
     try:
+        # Convert the cookie string into a dictionary format expected by yt-dlp
+        cookies = {}
+        for cookie in cookie_data.split(';'):
+            cookie = cookie.strip()
+            if '=' in cookie:
+                key, value = cookie.split('=', 1)
+                cookies[key] = value
+
         video_url = f'https://www.youtube.com/watch?v={video_id}'
         ydl_opts = {
             'format': 'bestaudio/best',
+            'cookies': cookies,  # Use cookies directly
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
             'nocheckcertificate': True,
-            'retries': 10,
-            'socket_timeout': 60,
-            'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
+            }
         }
 
         with YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(video_url, download=False)
-            audio_url = info_dict['url']
-            content_type = info_dict.get('ext', 'mp3')
-
-            response = requests.head(audio_url, timeout=5)
-            if response.status_code != 200:
-                raise Exception(f'Audio URL not accessible: {response.status_code}')
-
-            cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)  # Cache for 1 hour
-            proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={audio_url}"
-
-            return jsonify({'audioUrl': proxy_url, 'contentType': f'audio/{content_type}'})
+            try:
+                info_dict = ydl.extract_info(video_url, download=False)
+                audio_url = info_dict['url']
+                
+                # Cache the successful URL
+                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
+                logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+                
+                return jsonify({'audioUrl': audio_url})
+                
+            except Exception as e:
+                logger.error(f'Error extracting video info: {str(e)}')
+                if 'confirm you\'re not a bot' in str(e):
+                    return jsonify({
+                        'error': 'YouTube bot detection triggered. Please check cookie configuration.'
+                    }), 403
+                return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
 
     except Exception as e:
-        logger.error(f"Error in stream endpoint: {e}")
+        logger.error(f'Error in cookie handling: {str(e)}')
         return jsonify({'error': 'Failed to process video request'}), 500
 
+
+
+@app.route('/recently-played', methods=['POST'])
+def add_recently_played():
+    """Add a song to the recently played list."""
+    data = request.get_json()
+    video_id = data.get('videoId')
+    title = data.get('title')
+
+    if not video_id or not title:
+        return jsonify({'error': 'Video ID and title are required'}), 400
+
+    # Fetch existing recently played songs
+    recently_played = cache.get('recently_played')
+    recently_played = eval(recently_played) if recently_played else []
+
+    # Add the new song to the list and limit to last 10 songs
+    recently_played.append({'videoId': video_id, 'title': title})
+    recently_played = recently_played[-10:]
+
+    # Cache the updated list
+    cache.set('recently_played', recently_played, timeout=60 * 60 * 24 * 2)  # Cache for 7 days
+    return jsonify({'message': 'Song added to recently played'})
+
+@app.route('/recently-played', methods=['GET'])
+def get_recently_played():
+    """Get the list of recently played songs."""
+    recently_played = cache.get('recently_played')
+    recently_played = eval(recently_played) if recently_played else []
+    return jsonify(recently_played)
+
+@app.route('/liked-songs', methods=['POST'])
+def like_song():
+    """Add a song to the liked songs list."""
+    data = request.get_json()
+    video_id = data.get('videoId')
+    title = data.get('title')
+
+    if not video_id or not title:
+        return jsonify({'error': 'Video ID and title are required'}), 400
+
+    # Fetch existing liked songs
+    liked_songs = cache.get('liked_songs')
+    liked_songs = eval(liked_songs) if liked_songs else []
+
+    # Add the new song to the list if it's not already liked
+    if {'videoId': video_id, 'title': title} not in liked_songs:
+        liked_songs.append({'videoId': video_id, 'title': title})
+
+    # Cache the updated list
+    cache.set('liked_songs', liked_songs, timeout=60 * 60 * 24 * 120)  # Cache for 120 days
+    return jsonify({'message': 'Song added to liked songs'})
+
+@app.route('/liked-songs', methods=['GET'])
+def get_liked_songs():
+    """Get the list of liked songs."""
+    liked_songs = cache.get('liked_songs')
+    liked_songs = eval(liked_songs) if liked_songs else []
+    return jsonify(liked_songs)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
 # Recently played functionality using Redis cache
 @app.route('/recently-played', methods=['POST'])
 def add_recently_played():
