@@ -7,3 +7,4 @@ requests==2.26.0
 redis==5.2.1
 python-dotenv
 gunicorn
+eventlet
