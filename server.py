@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_caching import Cache
 from googleapiclient.discovery import build
@@ -7,11 +7,7 @@ import logging
 import requests
 import redis
 from dotenv import load_dotenv
-from urllib.parse import quote
 import os
-import tempfile
-import ffmpeg
-import io
 
 app = Flask(__name__)
 
@@ -21,14 +17,30 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Configure CORS to accept requests from any origin
-CORS(app, resources={r"/*": {"origins": "*"}})
 
+# Configure CORS to accept requests from any origin
+CORS(app, resources={
+    r"/*": {
+        "origins": ["*"],  # Allow all origins
+        "methods": ["GET", "POST", "OPTIONS"],  # Allowed methods
+        "allow_headers": ["Content-Type", "Authorization"]  # Allowed headers
+    }
+})
+
+# Setup caching (Redis as cache backend)
 # Setup caching (Upstash Redis as cache backend)
 app.config['CACHE_TYPE'] = 'RedisCache'
 app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')  # Load from .env
 app.config['CACHE_REDIS_SSL'] = True
 cache = Cache(app)
+
+# Test Redis connection (check if it's working correctly)
+try:
+    cache.get('test_key')  # Test Redis connection
+except redis.exceptions.AuthenticationError as e:
+    print(f"Redis authentication error: {e}")
+except Exception as e:
+    print(f"Error connecting to Redis: {e}")
 
 # YouTube API setup
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')  # Load from .env
@@ -41,9 +53,11 @@ except ConnectionError as e:
     logger.error(f'Redis connection error: {e}')
     exit(1)  # Exit if Redis is unavailable
 
+
 @app.route('/')
 def home():
-    return "Welcome to deployed Flask server and it's running successfully!"
+    return "Welcome to deployed Flask server and it running sucessfully!"
+
 
 @app.route('/search', methods=['GET'])
 def search_videos():
@@ -77,12 +91,38 @@ def stream_audio():
     if not video_id:
         return jsonify({'error': 'Video ID is required'}), 400
 
-    video_url = f'https://www.youtube.com/watch?v={video_id}'
-    
+    # Check if the audio URL is cached
+    cached_audio_url = cache.get(f"audio_url:{video_id}")
+    if cached_audio_url:
+        try:
+            response = requests.head(cached_audio_url)
+            if response.status_code == 200:
+                logger.info(f'Cache hit for video ID: {video_id}')
+                return jsonify({'audioUrl': cached_audio_url})
+            else:
+                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
+        except Exception as e:
+            logger.warning(f'Error validating cached URL: {e}')
+
+    # Get cookies from environment variable
+    cookie_data = os.getenv('YOUTUBE_COOKIES')
+    if not cookie_data:
+        logger.error('YOUTUBE_COOKIES environment variable not set')
+        return jsonify({'error': 'Cookie configuration missing'}), 500
+
     try:
-        # Use yt-dlp to fetch video info and audio URL
+        # Convert the cookie string into a dictionary format expected by yt-dlp
+        cookies = {}
+        for cookie in cookie_data.split(';'):
+            cookie = cookie.strip()
+            if '=' in cookie:
+                key, value = cookie.split('=', 1)
+                cookies[key] = value
+
+        video_url = f'https://www.youtube.com/watch?v={video_id}'
         ydl_opts = {
             'format': 'bestaudio/best',
+            'cookies': cookies,  # Use cookies directly
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
@@ -93,30 +133,28 @@ def stream_audio():
         }
 
         with YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(video_url, download=False)
-            audio_url = info_dict['url']  # Get the URL for the audio stream
-            
-            # Fetch audio via requests
-            audio_stream = requests.get(audio_url, stream=True)
+            try:
+                info_dict = ydl.extract_info(video_url, download=False)
+                audio_url = info_dict['url']
+                
+                # Cache the successful URL
+                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
+                logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+                
+                return jsonify({'audioUrl': audio_url})
+                
+            except Exception as e:
+                logger.error(f'Error extracting video info: {str(e)}')
+                if 'confirm you\'re not a bot' in str(e):
+                    return jsonify({
+                        'error': 'YouTube bot detection triggered. Please check cookie configuration.'
+                    }), 403
+                return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
 
-            # Create a BytesIO buffer to store the converted audio
-            output_stream = io.BytesIO()
-
-            # Use ffmpeg to convert the audio stream directly to MP3 and store it in the output buffer
-            ffmpeg.input('pipe:0').output(output_stream, format='mp3').run(input=audio_stream.raw)
-
-            output_stream.seek(0)  # Rewind to the beginning of the stream
-            
-            # Return the converted audio stream with CORS headers
-            headers = {
-                'Access-Control-Allow-Origin': '*',
-                'Content-Type': 'audio/mp3',
-            }
-
-            return Response(output_stream, content_type='audio/mp3', headers=headers)
     except Exception as e:
-        logger.error(f'Error in streaming or converting audio: {str(e)}')
-        return jsonify({'error': 'Failed to stream or convert audio'}), 500
+        logger.error(f'Error in cookie handling: {str(e)}')
+        return jsonify({'error': 'Failed to process video request'}), 500
+
 
 
 @app.route('/recently-played', methods=['POST'])
@@ -179,5 +217,4 @@ def get_liked_songs():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
-
+    app.run(host='0.0.0.0', port=port, debug=True)
