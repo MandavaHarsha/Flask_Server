@@ -8,6 +8,7 @@ import requests
 import redis
 from dotenv import load_dotenv
 import os
+import tempfile
 
 app = Flask(__name__)
 
