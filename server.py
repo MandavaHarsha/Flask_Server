@@ -66,24 +66,14 @@ def search_videos():
         return jsonify({'error': 'Query parameter "q" is required'}), 400
 
     try:
-        search_response = youtube.search().list(
-            q=query,
-            part='id,snippet',
-            maxResults=5,
-            type='video'
-        ).execute()
+        search_response = youtube.search().list(q=query, part='id,snippet', maxResults=5, type='video').execute()
     except Exception as e:
-        logger.error(f'Error fetching search results: {e}')
+        logger.error(f"Error fetching search results: {e}")
         return jsonify({'error': 'Failed to fetch search results'}), 500
 
-    results = [
-        {'videoId': item['id']['videoId'], 'title': item['snippet']['title']}
-        for item in search_response.get('items', [])
-    ]
-
+    results = [{'videoId': item['id']['videoId'], 'title': item['snippet']['title']} for item in search_response.get('items', [])]
     return jsonify(results)
 
-# Stream audio from a proxied URL (using Redis cache for storage)
 @app.route('/proxy-stream', methods=['GET'])
 def proxy_stream():
     url = request.args.get('url')
@@ -91,117 +81,68 @@ def proxy_stream():
         return jsonify({'error': 'URL parameter is required'}), 400
 
     try:
-        # Make a streaming request to the audio URL
         response = requests.get(url, stream=True)
+        headers = {'Content-Type': response.headers.get('Content-Type', 'audio/webm'), 'Content-Length': response.headers.get('Content-Length', ''), 'Accept-Ranges': 'bytes', 'Access-Control-Allow-Origin': '*', 'Connection': 'keep-alive'}
 
-        # Forward the response headers
-        headers = {
-            'Content-Type': response.headers.get('Content-Type', 'audio/webm'),
-            'Content-Length': response.headers.get('Content-Length', ''),
-            'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*',
-            'Connection': 'keep-alive'
-        }
-
-        # Stream the response back to the client
         def generate():
             for chunk in response.iter_content(chunk_size=8192):
                 yield chunk
 
-        return Response(
-            stream_with_context(generate()),
-            headers=headers,
-            status=response.status_code
-        )
+        return Response(stream_with_context(generate()), headers=headers, status=response.status_code)
 
     except Exception as e:
-        logger.error(f'Proxy streaming error: {str(e)}')
+        logger.error(f"Proxy streaming error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Stream audio by extracting from YouTube (using Redis cache)
 @app.route('/stream', methods=['POST'])
 def stream_audio():
     data = request.get_json()
     video_id = data.get('videoId')
-
     if not video_id:
         return jsonify({'error': 'Video ID is required'}), 400
 
-    # Check if the audio URL is cached
+    # Check Redis cache for the audio URL
     cached_audio_url = cache.get(f"audio_url:{video_id}")
     if cached_audio_url:
         try:
-            # Verify the cached URL is still valid
             response = requests.head(cached_audio_url, timeout=5)
             if response.status_code == 200:
-                logger.info(f'Cache hit for video ID: {video_id}')
-                proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={quote(cached_audio_url)}"
-                return jsonify({
-                    'audioUrl': proxy_url,
-                    'contentType': response.headers.get('content-type', '')
-                })
+                logger.info(f"Cache hit for video ID: {video_id}")
+                proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={cached_audio_url}"
+                return jsonify({'audioUrl': proxy_url, 'contentType': response.headers.get('content-type', '')})
         except Exception as e:
-            logger.warning(f'Error validating cached URL: {e}')
+            logger.warning(f"Error validating cached URL: {e}")
             cache.delete(f"audio_url:{video_id}")
 
     try:
-        # Get cookies from environment variable
-        cookie_data = os.getenv('YOUTUBE_COOKIES')
-        if not cookie_data:
-            logger.error('YOUTUBE_COOKIES environment variable not set')
-            return jsonify({'error': 'Cookie configuration missing'}), 500
+        video_url = f'https://www.youtube.com/watch?v={video_id}'
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'nocheckcertificate': True,
+            'retries': 10,
+            'socket_timeout': 60,
+            'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        }
 
-        with tempfile.NamedTemporaryFile(mode='w+', delete=True) as temp_cookie_file:
-            temp_cookie_file.write(cookie_data)
-            temp_cookie_file.flush()
+        with YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(video_url, download=False)
+            audio_url = info_dict['url']
+            content_type = info_dict.get('ext', 'mp3')
 
-            video_url = f'https://www.youtube.com/watch?v={video_id}'
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'cookiefile': temp_cookie_file.name,
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'nocheckcertificate': True,
-                'retries': 10, 
-                'socket_timeout': 18000, 
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-            }
+            response = requests.head(audio_url, timeout=5)
+            if response.status_code != 200:
+                raise Exception(f'Audio URL not accessible: {response.status_code}')
 
+            cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)  # Cache for 1 hour
+            proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={audio_url}"
 
-            with YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info_dict = ydl.extract_info(video_url, download=False)
-                    logger.info(f"Available formats for {video_id}: {[f['format'] for f in info_dict.get('formats', [])]}")
-
-                    audio_url = info_dict['url']
-                    content_type = info_dict.get('ext', 'mp3')
-
-                    # Verify the extracted URL is accessible
-                    response = requests.head(audio_url, timeout=5)
-                    if response.status_code != 200:
-                        raise Exception(f'Audio URL not accessible: {response.status_code}')
-
-                    # Cache the successful URL
-                    cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)  # Cache for 1 hour
-                    logger.info(f'Successfully cached audio URL for video ID: {video_id}')
-
-                    # Return the proxied URL
-                    proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={quote(audio_url)}"
-
-                    return jsonify({
-                        'audioUrl': proxy_url,
-                        'contentType': f'audio/{content_type}'
-                    })
-
-                except Exception as e:
-                    logger.error(f'Error extracting video info: {str(e)}')
-                    return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
+            return jsonify({'audioUrl': proxy_url, 'contentType': f'audio/{content_type}'})
 
     except Exception as e:
-        logger.error(f'Error in stream endpoint: {str(e)}')
+        logger.error(f"Error in stream endpoint: {e}")
         return jsonify({'error': 'Failed to process video request'}), 500
 
 # Recently played functionality using Redis cache
