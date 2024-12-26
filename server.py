@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from urllib.parse import quote
 import os
 import tempfile
+import ffmpeg
+import io
 
 app = Flask(__name__)
 
@@ -75,38 +77,12 @@ def stream_audio():
     if not video_id:
         return jsonify({'error': 'Video ID is required'}), 400
 
-    # Check if the audio URL is cached
-    cached_audio_url = cache.get(f"audio_url:{video_id}")
-    if cached_audio_url:
-        try:
-            response = requests.head(cached_audio_url)
-            if response.status_code == 200:
-                logger.info(f'Cache hit for video ID: {video_id}')
-                return jsonify({'audioUrl': cached_audio_url})
-            else:
-                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
-        except Exception as e:
-            logger.warning(f'Error validating cached URL: {e}')
-
-    # Get cookies from environment variable
-    cookie_data = os.getenv('YOUTUBE_COOKIES')
-    if not cookie_data:
-        logger.error('YOUTUBE_COOKIES environment variable not set')
-        return jsonify({'error': 'Cookie configuration missing'}), 500
-
+    video_url = f'https://www.youtube.com/watch?v={video_id}'
+    
     try:
-        # Convert the cookie string into a dictionary format expected by yt-dlp
-        cookies = {}
-        for cookie in cookie_data.split(';'):
-            cookie = cookie.strip()
-            if '=' in cookie:
-                key, value = cookie.split('=', 1)
-                cookies[key] = value
-
-        video_url = f'https://www.youtube.com/watch?v={video_id}'
+        # Use yt-dlp to fetch video info and audio URL
         ydl_opts = {
             'format': 'bestaudio/best',
-            'cookies': cookies,  # Use cookies directly
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
@@ -117,33 +93,28 @@ def stream_audio():
         }
 
         with YoutubeDL(ydl_opts) as ydl:
-            try:
-                info_dict = ydl.extract_info(video_url, download=False)
-                audio_url = info_dict['url']
+            info_dict = ydl.extract_info(video_url, download=False)
+            audio_url = info_dict['url']  # Get the URL for the audio stream
+            
+            # Fetch audio via requests
+            audio_stream = requests.get(audio_url, stream=True)
 
-                # Cache the successful URL
-                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
-                logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+            # Convert the audio stream from WebM to MP3 using ffmpeg
+            output_stream = io.BytesIO()
+            ffmpeg.input(audio_stream.raw).output(output_stream, format='mp3').run()
 
-                # Add CORS headers to the response
-                headers = {
-                    'Access-Control-Allow-Origin': '*',  # Allow all origins
-                    'Content-Type': 'audio/webm',  # Adjust based on the actual audio format
-                }
+            output_stream.seek(0)  # Rewind to the beginning of the stream
+            
+            # Return the converted audio stream with CORS headers
+            headers = {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'audio/mp3',
+            }
 
-                return jsonify({'audioUrl': audio_url}), 200, headers
-
-            except Exception as e:
-                logger.error(f'Error extracting video info: {str(e)}')
-                if 'confirm you\'re not a bot' in str(e):
-                    return jsonify({
-                        'error': 'YouTube bot detection triggered. Please check cookie configuration.'
-                    }), 403
-                return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
-
+            return Response(output_stream, content_type='audio/mp3', headers=headers)
     except Exception as e:
-        logger.error(f'Error in cookie handling: {str(e)}')
-        return jsonify({'error': 'Failed to process video request'}), 500
+        logger.error(f'Error in streaming or converting audio: {str(e)}')
+        return jsonify({'error': 'Failed to stream or convert audio'}), 500
 
 
 
