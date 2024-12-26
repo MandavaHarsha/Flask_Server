@@ -8,80 +8,33 @@ import requests
 import redis
 from dotenv import load_dotenv
 import os
+import json
 
 app = Flask(__name__)
-
 load_dotenv()
 
-# Setup logging
+# Setup logging with more detailed formatting
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
-
-# Configure CORS to accept requests from any origin
 CORS(app, resources={
     r"/*": {
-        "origins": ["*"],  # Allow all origins
-        "methods": ["GET", "POST", "OPTIONS"],  # Allowed methods
-        "allow_headers": ["Content-Type", "Authorization"]  # Allowed headers
+        "origins": ["*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
     }
 })
 
-# Setup caching (Redis as cache backend)
-# Setup caching (Upstash Redis as cache backend)
 app.config['CACHE_TYPE'] = 'RedisCache'
-app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')  # Load from .env
+app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')
 app.config['CACHE_REDIS_SSL'] = True
 cache = Cache(app)
 
-# Test Redis connection (check if it's working correctly)
-try:
-    cache.get('test_key')  # Test Redis connection
-except redis.exceptions.AuthenticationError as e:
-    print(f"Redis authentication error: {e}")
-except Exception as e:
-    print(f"Error connecting to Redis: {e}")
-
-# YouTube API setup
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')  # Load from .env
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-
-# Check Redis connection
-try:
-    cache.get('test_key')  # Test Redis connection
-except ConnectionError as e:
-    logger.error(f'Redis connection error: {e}')
-    exit(1)  # Exit if Redis is unavailable
-
-
-@app.route('/')
-def home():
-    return "Welcome to deployed Flask server and it running sucessfully!"
-
-
-@app.route('/search', methods=['GET'])
-def search_videos():
-    query = request.args.get('q', '').strip()
-    if not query:
-        return jsonify({'error': 'Query parameter "q" is required'}), 400
-
-    try:
-        search_response = youtube.search().list(
-            q=query,
-            part='id,snippet',
-            maxResults=5,
-            type='video'
-        ).execute()
-    except Exception as e:
-        logger.error(f'Error fetching search results: {e}')
-        return jsonify({'error': 'Failed to fetch search results'}), 500
-
-    results = [
-        {'videoId': item['id']['videoId'], 'title': item['snippet']['title']}
-        for item in search_response.get('items', [])
-    ]
-
-    return jsonify(results)
 
 @app.route('/stream', methods=['POST'])
 def stream_audio():
@@ -91,69 +44,96 @@ def stream_audio():
     if not video_id:
         return jsonify({'error': 'Video ID is required'}), 400
 
-    # Check if the audio URL is cached
+    # Check cache with validation
     cached_audio_url = cache.get(f"audio_url:{video_id}")
     if cached_audio_url:
         try:
-            response = requests.head(cached_audio_url)
+            # Use GET instead of HEAD to properly validate the URL
+            response = requests.get(cached_audio_url, stream=True, timeout=5)
+            response.close()  # Close the connection immediately after validation
+            
             if response.status_code == 200:
-                logger.info(f'Cache hit for video ID: {video_id}')
+                logger.info(f'Valid cached URL found for video ID: {video_id}')
                 return jsonify({'audioUrl': cached_audio_url})
             else:
-                logger.warning(f'Cached URL for video ID {video_id} is invalid. Generating a new one.')
+                logger.warning(f'Cached URL invalid for video ID {video_id}, status: {response.status_code}')
+                cache.delete(f"audio_url:{video_id}")
         except Exception as e:
-            logger.warning(f'Error validating cached URL: {e}')
+            logger.warning(f'Error validating cached URL: {str(e)}')
+            cache.delete(f"audio_url:{video_id}")
 
-    # Get cookies from environment variable
-    cookie_data = os.getenv('YOUTUBE_COOKIES')
-    if not cookie_data:
-        logger.error('YOUTUBE_COOKIES environment variable not set')
-        return jsonify({'error': 'Cookie configuration missing'}), 500
+    # Parse cookies from environment variable
+    try:
+        cookie_data = os.getenv('YOUTUBE_COOKIES', '')
+        cookies = {}
+        if cookie_data:
+            for cookie in cookie_data.split(';'):
+                cookie = cookie.strip()
+                if '=' in cookie:
+                    key, value = cookie.split('=', 1)
+                    cookies[key.strip()] = value.strip()
+    except Exception as e:
+        logger.error(f'Cookie parsing error: {str(e)}')
+        cookies = {}
 
     try:
-        # Convert the cookie string into a dictionary format expected by yt-dlp
-        cookies = {}
-        for cookie in cookie_data.split(';'):
-            cookie = cookie.strip()
-            if '=' in cookie:
-                key, value = cookie.split('=', 1)
-                cookies[key] = value
-
         video_url = f'https://www.youtube.com/watch?v={video_id}'
         ydl_opts = {
-            'format': 'bestaudio/best',
-            'cookies': cookies, 
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # Prefer m4a format
+            'cookies': cookies,
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
             'nocheckcertificate': True,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         }
 
         with YoutubeDL(ydl_opts) as ydl:
             try:
                 info_dict = ydl.extract_info(video_url, download=False)
+                
+                # Ensure we have a valid audio URL
+                if 'url' not in info_dict:
+                    raise Exception('No audio URL found in extracted info')
+                
                 audio_url = info_dict['url']
                 
-                # Cache the successful URL
-                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
-                logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+                # Validate the extracted URL
+                validation_response = requests.get(audio_url, stream=True, timeout=5)
+                validation_response.close()
                 
-                return jsonify({'audioUrl': audio_url})
+                if validation_response.status_code != 200:
+                    raise Exception(f'Invalid audio URL (Status: {validation_response.status_code})')
+                
+                # Cache the valid URL
+                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)  # Cache for 1 hour
+                logger.info(f'Successfully cached new audio URL for video ID: {video_id}')
+                
+                return jsonify({
+                    'audioUrl': audio_url,
+                    'format': info_dict.get('format', 'unknown'),
+                    'ext': info_dict.get('ext', 'unknown')
+                })
                 
             except Exception as e:
                 logger.error(f'Error extracting video info: {str(e)}')
-                if 'confirm you\'re not a bot' in str(e):
+                error_message = str(e)
+                if 'confirm you\'re not a bot' in error_message:
                     return jsonify({
-                        'error': 'YouTube bot detection triggered. Please check cookie configuration.'
+                        'error': 'YouTube authentication required. Please update cookies.'
                     }), 403
-                return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
+                elif 'Private video' in error_message:
+                    return jsonify({'error': 'This video is private'}), 403
+                elif 'Copyright' in error_message:
+                    return jsonify({'error': 'This video is not available due to copyright restrictions'}), 403
+                else:
+                    return jsonify({'error': f'Failed to extract video info: {error_message}'}), 500
 
     except Exception as e:
-        logger.error(f'Error in cookie handling: {str(e)}')
-        return jsonify({'error': 'Failed to process video request'}), 500
+        logger.error(f'Unexpected error: {str(e)}')
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
 
 
