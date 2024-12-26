@@ -99,10 +99,10 @@ def stream_audio():
             # Fetch audio via requests
             audio_stream = requests.get(audio_url, stream=True)
 
-            # Convert the audio stream from WebM to MP3 using ffmpeg
+            # Convert the audio stream from WebM to MP3 using ffmpeg-python
             output_stream = io.BytesIO()
-            ffmpeg.input(audio_stream.raw).output(output_stream, format='mp3').run()
-
+            ffmpeg.input('pipe:0').output(output_stream, format='mp3').run(input=audio_stream.raw)
+            
             output_stream.seek(0)  # Rewind to the beginning of the stream
             
             # Return the converted audio stream with CORS headers
