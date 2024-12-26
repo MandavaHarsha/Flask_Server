@@ -100,7 +100,7 @@ def proxy_stream():
             'Content-Length': response.headers.get('Content-Length', ''),
             'Accept-Ranges': 'bytes',
             'Access-Control-Allow-Origin': '*'
-            'Connection': 'keep-alive' 
+            'Connection': 'keep-alive' ,
         }
 
         # Stream the response back to the client
