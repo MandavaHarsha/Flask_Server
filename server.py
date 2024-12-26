@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from flask_caching import Cache
 from googleapiclient.discovery import build
@@ -7,6 +7,7 @@ import logging
 import requests
 import redis
 from dotenv import load_dotenv
+from urllib.parse import quote
 import os
 import tempfile
 
@@ -84,6 +85,42 @@ def search_videos():
 
     return jsonify(results)
 
+# Example of a cache object, replace with actual cache mechanism
+cache = {}
+
+@app.route('/proxy-stream', methods=['GET'])
+def proxy_stream():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'URL parameter is required'}), 400
+
+    try:
+        # Make a streaming request to the audio URL
+        response = requests.get(url, stream=True)
+        
+        # Forward the response headers
+        headers = {
+            'Content-Type': response.headers.get('Content-Type', 'audio/webm'),
+            'Content-Length': response.headers.get('Content-Length', ''),
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*'
+        }
+
+        # Stream the response back to the client
+        def generate():
+            for chunk in response.iter_content(chunk_size=8192):
+                yield chunk
+
+        return Response(
+            stream_with_context(generate()),
+            headers=headers,
+            status=response.status_code
+        )
+
+    except Exception as e:
+        logger.error(f'Proxy streaming error: {str(e)}')
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/stream', methods=['POST'])
 def stream_audio():
     data = request.get_json()
@@ -141,24 +178,27 @@ def stream_audio():
                     info_dict = ydl.extract_info(video_url, download=False)
                     # Log the available formats
                     logger.info(f"Available formats for {video_id}: {[f['format'] for f in info_dict.get('formats', [])]}")
-                    
+
                     audio_url = info_dict['url']
                     content_type = info_dict.get('ext', 'mp3')
-                    
+
                     # Verify the extracted URL is accessible
                     response = requests.head(audio_url, timeout=5)
                     if response.status_code != 200:
                         raise Exception(f'Audio URL not accessible: {response.status_code}')
-                    
+
                     # Cache the successful URL
                     cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60)
                     logger.info(f'Successfully cached audio URL for video ID: {video_id}')
-                    
+
+                    # Return the proxied URL
+                    proxy_url = f"{request.host_url.rstrip('/')}/proxy-stream?url={quote(audio_url)}"
+
                     return jsonify({
-                        'audioUrl': audio_url,
+                        'audioUrl': proxy_url,
                         'contentType': f'audio/{content_type}'
                     })
-                    
+
                 except Exception as e:
                     logger.error(f'Error extracting video info: {str(e)}')
                     return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
