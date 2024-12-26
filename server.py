@@ -33,8 +33,54 @@ app.config['CACHE_REDIS_URL'] = os.getenv('CACHE_REDIS_URL')
 app.config['CACHE_REDIS_SSL'] = True
 cache = Cache(app)
 
+# Test Redis connection (check if it's working correctly)
+try:
+    cache.get('test_key')  # Test Redis connection
+except redis.exceptions.AuthenticationError as e:
+    print(f"Redis authentication error: {e}")
+except Exception as e:
+    print(f"Error connecting to Redis: {e}")
+
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+
+# Check Redis connection
+try:
+    cache.get('test_key')  # Test Redis connection
+except ConnectionError as e:
+    logger.error(f'Redis connection error: {e}')
+    exit(1)  # Exit if Redis is unavailable
+
+
+@app.route('/')
+def home():
+    return "Welcome to deployed Flask server and it running sucessfully!"
+
+
+@app.route('/search', methods=['GET'])
+def search_videos():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'error': 'Query parameter "q" is required'}), 400
+
+    try:
+        search_response = youtube.search().list(
+            q=query,
+            part='id,snippet',
+            maxResults=5,
+            type='video'
+        ).execute()
+    except Exception as e:
+        logger.error(f'Error fetching search results: {e}')
+        return jsonify({'error': 'Failed to fetch search results'}), 500
+
+    results = [
+        {'videoId': item['id']['videoId'], 'title': item['snippet']['title']}
+        for item in search_response.get('items', [])
+    ]
+
+    return jsonify(results)
+    
 
 @app.route('/stream', methods=['POST'])
 def stream_audio():
