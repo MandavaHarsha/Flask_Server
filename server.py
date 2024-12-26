@@ -100,6 +100,7 @@ def proxy_stream():
             'Content-Length': response.headers.get('Content-Length', ''),
             'Accept-Ranges': 'bytes',
             'Access-Control-Allow-Origin': '*'
+            'Connection': 'keep-alive' 
         }
 
         # Stream the response back to the client
@@ -162,11 +163,13 @@ def stream_audio():
                 'no_warnings': True,
                 'extract_flat': False,
                 'nocheckcertificate': True,
-                'format_sort': ['acodec:mp3', 'acodec:m4a'],  # Prefer MP3 or M4A formats
+                'retries': 10, 
+                'socket_timeout': 18000, 
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
             }
+
 
             with YoutubeDL(ydl_opts) as ydl:
                 try:
