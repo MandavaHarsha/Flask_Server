@@ -102,8 +102,8 @@ def stream_audio():
             # Create a BytesIO buffer to store the converted audio
             output_stream = io.BytesIO()
 
-            # Use ffmpeg to convert the audio stream directly to MP3
-            ffmpeg.input('pipe:0').output('pipe:1', format='mp3').run(input=audio_stream.raw, stdout=output_stream)
+            # Use ffmpeg to convert the audio stream directly to MP3 and store it in the output buffer
+            ffmpeg.input('pipe:0').output(output_stream, format='mp3').run(input=audio_stream.raw)
 
             output_stream.seek(0)  # Rewind to the beginning of the stream
             
@@ -117,7 +117,6 @@ def stream_audio():
     except Exception as e:
         logger.error(f'Error in streaming or converting audio: {str(e)}')
         return jsonify({'error': 'Failed to stream or convert audio'}), 500
-
 
 
 @app.route('/recently-played', methods=['POST'])
