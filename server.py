@@ -8,7 +8,6 @@ import requests
 import redis
 from dotenv import load_dotenv
 import os
-import tempfile
 
 app = Flask(__name__)
 
@@ -112,47 +111,50 @@ def stream_audio():
         return jsonify({'error': 'Cookie configuration missing'}), 500
 
     try:
-        # Create a temporary file to store cookies
-        with tempfile.NamedTemporaryFile(mode='w+', delete=True) as temp_cookie_file:
-            # Write the cookie data to temporary file
-            temp_cookie_file.write(cookie_data)
-            temp_cookie_file.flush()
+        # Convert the cookie string into a dictionary format expected by yt-dlp
+        cookies = {}
+        for cookie in cookie_data.split(';'):
+            cookie = cookie.strip()
+            if '=' in cookie:
+                key, value = cookie.split('=', 1)
+                cookies[key] = value
 
-            video_url = f'https://www.youtube.com/watch?v={video_id}'
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'cookiefile': temp_cookie_file.name,
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'nocheckcertificate': True,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
-                }
+        video_url = f'https://www.youtube.com/watch?v={video_id}'
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'cookies': cookies, 
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'nocheckcertificate': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.110 Safari/537.36'
             }
+        }
 
-            with YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info_dict = ydl.extract_info(video_url, download=False)
-                    audio_url = info_dict['url']
-                    
-                    # Cache the successful URL
-                    cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
-                    logger.info(f'Successfully cached audio URL for video ID: {video_id}')
-                    
-                    return jsonify({'audioUrl': audio_url})
-                    
-                except Exception as e:
-                    logger.error(f'Error extracting video info: {str(e)}')
-                    if 'confirm you\'re not a bot' in str(e):
-                        return jsonify({
-                            'error': 'YouTube bot detection triggered. Please check cookie configuration.'
-                        }), 403
-                    return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
+        with YoutubeDL(ydl_opts) as ydl:
+            try:
+                info_dict = ydl.extract_info(video_url, download=False)
+                audio_url = info_dict['url']
+                
+                # Cache the successful URL
+                cache.set(f"audio_url:{video_id}", audio_url, timeout=60 * 60 * 24 * 7)
+                logger.info(f'Successfully cached audio URL for video ID: {video_id}')
+                
+                return jsonify({'audioUrl': audio_url})
+                
+            except Exception as e:
+                logger.error(f'Error extracting video info: {str(e)}')
+                if 'confirm you\'re not a bot' in str(e):
+                    return jsonify({
+                        'error': 'YouTube bot detection triggered. Please check cookie configuration.'
+                    }), 403
+                return jsonify({'error': f'Failed to extract video info: {str(e)}'}), 500
 
     except Exception as e:
         logger.error(f'Error in cookie handling: {str(e)}')
         return jsonify({'error': 'Failed to process video request'}), 500
+
 
 
 @app.route('/recently-played', methods=['POST'])
@@ -216,4 +218,3 @@ def get_liked_songs():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
-
